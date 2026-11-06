@@ -26,6 +26,7 @@ The first content scan takes about 10 seconds and runs in the background. After 
 | Attach geometry | Select the objects, then the entity last, and press **Ctrl+P > Attach mesh to Controller …** |
 | Nest entities | Parent an entity to another entity (normal Ctrl+P). The parenting is exported |
 | Export | **File > Export > AdvDupe2 Prop2Mesh (.txt)**. It defaults to `garrysmod/data/advdupe2` |
+| Export for Starfall | **File > Export > Starfall Mesh Tree**. Writes OBJ meshes and a manifest into a local clone of a GitHub repository; a Starfall chip builds them client-side. See the [User Guide](docs/USER_GUIDE.md#starfall-mesh-tree-client-side-meshes) |
 
 - **Parts:** any mesh, curve, surface, metaball or text object below an entity is a part, including indirect children. A part uses its own controller, or inherits the one set on the nearest object above it.
 - **Exported geometry:** the evaluated geometry (with modifiers applied). The entity's own model is never exported as geometry; it is only the entity's `Model`.
@@ -65,6 +66,8 @@ src/autoprop2mesh/
     studiomdl.py   MDL/VVD/VTX loader      vtf.py  VTF decoder     vmt.py  VMT parser
     ad2.py         AdvDupe2 rev 5 codec    gmod_lzma.py  util.Compress format
     p2m.py         Prop2Mesh part lists (mesh + model parts) and dupe entities
+    starfall.py    OBJ writer for Starfall's mesh parser (used by tree.py)
+    tree.py        Starfall mesh tree: pivots, merged meshes, manifest.json and the loader chip
     clipping.py    port of P2M's applyClippingPlane
     raster.py      software renderer for model browser previews
   content.py       content -> Blender meshes, images, materials
@@ -75,6 +78,7 @@ src/autoprop2mesh/
   browser.py, ops.py, ui.py, props.py, prefs.py
 tests/blender_integration.py   end-to-end test (needs a GMod install)
 tests/clip_stress.py           clip plane stress test (needs a GMod install)
+tests/starfall_tree.py          Starfall mesh tree export test (no GMod install needed)
 tools/build_extension.py       builds the release zip (used by the GitHub workflow)
 ```
 
@@ -85,6 +89,12 @@ These need a Garry's Mod install:
 ```
 blender -b --factory-startup --python tests/blender_integration.py
 blender -b --factory-startup --python tests/clip_stress.py
+```
+
+The Starfall mesh tree test does not need Garry's Mod:
+
+```
+blender -b --factory-startup --python tests/starfall_tree.py
 ```
 
 ## Releases

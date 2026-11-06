@@ -303,6 +303,50 @@ After exporting, Blender's status bar reports the number of entities, controller
 
 The server's own limits still apply, for example how many Prop2Mesh entities you may spawn.
 
+### Starfall mesh tree (client-side meshes)
+
+**File > Export > Starfall Mesh Tree (folders + manifest)** exports the same scene as client-side [StarfallEx](https://github.com/thegrb93/StarfallEx) meshes instead of Prop2Mesh entities. A small generic Starfall chip downloads the meshes from a GitHub repository and builds them as parented holograms, so nothing has to run on the server.
+
+**One-time setup** (Edit > Preferences > Add-ons > AutoProp2Mesh):
+
+- **Mesh Repository Folder:** a local clone of the GitHub repository the meshes will live in, for example a GitHub Desktop folder.
+- The GitHub user, repository and branch are read from the clone's `.git` folder. Fill them in only to override.
+
+**Export:** enter a **Project Name** (the folder created inside the repository). The export writes `<repo>/<project>/`:
+
+```
+manifest.json     hierarchy, per-pivot transforms, colors and materials
+loader.lua        the Starfall chip, already pointed at your repository
+<pivot>/mesh_1.obj, mesh_2.obj ...
+```
+
+Commit and push the repository, then paste `loader.lua` into a Starfall chip and spawn it. The chip downloads `manifest.json` and the OBJ files and builds the model around itself.
+
+**How the scene becomes a tree:**
+
+- The Blender parent hierarchy is the tree. A node is a **pivot** when it has children or has no mesh of its own. Pivots keep their own hologram, so they can be animated, and their transform is stored relative to their parent.
+- A mesh with no children is a rigid attachment of its parent pivot. Its vertices are baked into the pivot's frame and merged with the pivot's other meshes of the same controller color, material and UV scale. Everything inside one pivot rides on one hologram, so the hologram count stays low.
+- Colors, materials and UV scale come from each part's controller, exactly as for the dupe export. Model parts are skipped (they have no mesh data to export).
+
+| Option | Default | What it does |
+|---|---|---|
+| **Project Name** | the .blend name | Folder created inside the repository. Exporting the same name again replaces that folder |
+| **Model Faces** | +X | The direction the model faces in Blender. The whole model is turned so it faces +X in game. A model built facing Blender's front view (-Y) needs the `-Y` setting |
+| **Selected Hierarchies Only** | Off | Exports only hierarchies that contain a selected object |
+| **Include Hidden Parts** | Off | Also exports hidden parts |
+| **Invert Normals** | Off | Flips winding and normals (inside-out meshes) |
+| **No Cull** | Off | Draws both sides of every face (one extra hologram per mesh) |
+
+**In game.** The settings at the top of `loader.lua`:
+
+- `REPO_URL` and `PROJECT` pick what to load. Change `PROJECT` to load another project from the same repository.
+- `YAW_OFFSET` adds an extra turn about up, on top of the exported **Model Faces** turn.
+- `DEBUG = true` shows every pivot as a small magenta cube with a red nub pointing along its forward axis, and lists the pivots in chat.
+- Each pivot is available as `P2M.nodes["hull/torso"]` for animation, for example `:setLocalAngles(...)`.
+
+Starfall limits a player to 200 holograms by default (`sf_holograms_max`), and the export reports how many the model needs. GitHub's raw URLs can serve a stale file for a few minutes after a push.
+
+
 ---
 
 ## 12. Limits and things Prop2Mesh ignores
