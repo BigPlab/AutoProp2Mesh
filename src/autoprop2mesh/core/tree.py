@@ -6,7 +6,7 @@ A node is a pivot (it keeps its own hologram, so it can be animated and can have
 children) when it has children or has no mesh. A mesh with no children is a rigid
 attachment of its parent pivot: its vertices are baked into the pivot's frame and
 merged with the pivot's other meshes of the same color, material and UV scale, so
-everything in a folder like R_Shoulder rides on one hologram.
+everything in a pivot folder such as `arm` rides on one hologram.
 
 Layout (a pivot gets a folder holding its merged meshes):
 
