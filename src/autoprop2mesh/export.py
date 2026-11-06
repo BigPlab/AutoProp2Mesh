@@ -9,17 +9,18 @@ x = roll, y = pitch, z = yaw.
 The dupe origin (the point AdvDupe2 pastes at) is Blender's world origin.
 """
 
+import json
 import math
 import os
 
 import bpy
 import numpy as np
-from bpy.props import BoolProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper
 from mathutils import Matrix
 
 from . import entities, modelparts, prefs, props, sync, uvpreview
-from .core import ad2, p2m
+from .core import ad2, p2m, starfall, tree
 
 
 def matrix_to_source(matrix, unit_scale):
@@ -245,8 +246,189 @@ class P2M_OT_export_advdupe2(bpy.types.Operator, ExportHelper):
         layout.prop(context.scene.p2m, "unit_scale", text="Units per BU")
 
 
+def gather_tree(context, selection_only=False, include_hidden=False):
+    """The Blender parent hierarchy above/below P2M entities as TreeNodes.
+    Returns (list of root TreeNode, warnings)."""
+    scene = context.scene
+    us = props.unit_scale(scene)
+    warnings = []
+    if selection_only:
+        seeds = list(context.selected_objects)
+    else:
+        seeds = [o for o in scene.objects if o.p2m.is_entity]
+    root_objs = []
+    for o in seeds:
+        while o.parent is not None:
+            o = o.parent
+        if o not in root_objs:
+            root_objs.append(o)
+    if not root_objs:
+        return [], ["No Prop2Mesh entities to export"]
+
+    depsgraph = context.evaluated_depsgraph_get()
+    stats = {"no_ctrl": 0}
+
+    def build(obj, parent_frame):
+        _pos, _ang, frame = matrix_to_source(obj.matrix_world, us)
+        rpos, rang, _ = matrix_to_source(parent_frame.inverted() @ frame, us)
+        node = tree.TreeNode(obj.name, rpos, rang)
+        if not obj.p2m.is_entity and sync.is_geometry(obj) and (include_hidden or _visible(obj, context)):
+            if obj.p2m.is_model_part:
+                warnings.append("%s is a model part; the mesh tree export only supports mesh parts" % obj.name)
+            else:
+                geo = part_geometry(obj, depsgraph, frame.inverted(), us)
+                if geo is not None:
+                    node.chunks = p2m.split_part(geo)
+                    _ent, ctrl = sync.resolve(obj)
+                    if ctrl is None:
+                        stats["no_ctrl"] += 1
+                    else:
+                        node.color = tuple(int(round(v * 255.0)) for v in ctrl.color)
+                        node.material = ctrl.material.strip() or p2m.DEFAULT_MATERIAL
+                        node.uvs = ctrl.uvs
+        for child in sorted(obj.children, key=lambda c: c.name):
+            if child.p2m.is_clip_plane:
+                continue
+            c = build(child, frame)
+            if c is not None:
+                node.children.append(c)
+        if not node.chunks and not node.children:
+            return None
+        return node
+
+    roots = [n for n in (build(o, Matrix.Identity(4)) for o in root_objs) if n is not None]
+    if stats["no_ctrl"]:
+        warnings.append("%d mesh(es) are not below a controller and use the default color/material" % stats["no_ctrl"])
+    if not roots:
+        return [], ["Nothing to export: no visible mesh geometry"]
+    return roots, warnings
+
+
+def _previous_export_files(root):
+    """OBJ paths (relative, '/'-separated) listed by an earlier export's manifest in
+    root; empty if root holds no manifest written by this exporter."""
+    try:
+        with open(os.path.join(root, tree.MANIFEST_NAME), encoding="utf-8") as f:
+            manifest = json.load(f)
+        if not isinstance(manifest, dict) or "version" not in manifest or "nodes" not in manifest:
+            return set()
+        return set(tree.manifest_files(manifest))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return set()
+
+
+def _remove_stale(root, rels):
+    """Deletes files an earlier export wrote and this one no longer does, then the
+    folders that became empty. Anything else in the project folder is left alone."""
+    base = os.path.abspath(root)
+    for rel in rels:
+        path = os.path.abspath(os.path.join(base, *rel.split("/")))
+        if not path.startswith(base + os.sep):
+            continue
+        try:
+            os.remove(path)
+            folder = os.path.dirname(path)
+            while folder != base:
+                os.rmdir(folder)  # fails (and stops) at the first non-empty folder
+                folder = os.path.dirname(folder)
+        except OSError:
+            pass
+
+
+class P2M_OT_export_starfall_tree(bpy.types.Operator):
+    """Export the parent hierarchy as a project folder (OBJ tree + manifest.json + loader chip) in the mesh repository"""
+    bl_idname = "export_scene.p2m_starfall_tree"
+    bl_label = "Export Starfall Mesh Tree"
+    bl_options = {"PRESET"}
+
+    project_name: StringProperty(
+        name="Project Name", default="",
+        description="Folder created inside the mesh repository; the loader chip fetches it by this name")
+    selection_only: BoolProperty(
+        name="Selected Hierarchies Only", default=False,
+        description="Export only the hierarchies that contain selected objects")
+    include_hidden: BoolProperty(name="Include Hidden Parts", default=False)
+    invert_normals: BoolProperty(
+        name="Invert Normals", default=False,
+        description="Flip the face winding and normals of the exported OBJs (inside-out meshes)")
+    nocull: BoolProperty(
+        name="No Cull", default=False,
+        description="Show both sides of every face (draws each mesh on two holograms)")
+    model_front: EnumProperty(
+        name="Model Faces", default="X",
+        items=(
+            ("X", "+X (Source forward)", "The model already faces +X, the Garry's Mod forward axis"),
+            ("-Y", "-Y (Blender front view)", "The model faces the Blender front view (-Y); turned 90 degrees to face +X in game"),
+            ("Y", "+Y", "The model faces +Y; turned -90 degrees to face +X in game"),
+            ("-X", "-X", "The model faces -X; turned 180 degrees to face +X in game"),
+        ),
+        description="The direction the model faces in Blender; the loader turns the whole model so it faces +X in game")
+
+    def invoke(self, context, event):
+        if not self.project_name:
+            self.project_name = bpy.path.display_name_from_filepath(bpy.data.filepath) or "mech"
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        repo_dir = prefs.resolved_repo_dir()
+        if not repo_dir or not os.path.isdir(repo_dir):
+            self.report({"ERROR"}, "Set the Mesh Repository Folder in the add-on preferences")
+            return {"CANCELLED"}
+        project = starfall.safe_name(self.project_name)
+        user, repo, branch = prefs.resolved_github()
+        if user and repo:
+            repo_url = starfall.raw_base_url(user, repo, branch, "")
+        else:
+            repo_url = starfall.raw_base_url("USER", "REPO", branch, "")
+        sync.full_sync(context.scene)
+        roots, warnings = gather_tree(context, self.selection_only, self.include_hidden)
+        if not roots:
+            self.report({"ERROR"}, warnings[0] if warnings else "Nothing to export")
+            return {"CANCELLED"}
+        if not (user and repo):
+            warnings.append("GitHub user/repository not found: set them in the preferences or edit REPO_URL in %s" % tree.LOADER_NAME)
+        root = os.path.join(repo_dir, project)
+        try:
+            yaw = {"X": 0.0, "-Y": 90.0, "Y": -90.0, "-X": 180.0}[self.model_front]
+            manifest, files, report = tree.build(roots, project, self.invert_normals, self.nocull, yaw)
+            previous = _previous_export_files(root)
+            os.makedirs(root, exist_ok=True)
+            for rel, text in files.items():
+                path = os.path.join(root, *rel.split("/"))
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", encoding="ascii", newline="\n") as f:
+                    f.write(text)
+            with open(os.path.join(root, tree.MANIFEST_NAME), "w", encoding="utf-8", newline="\n") as f:
+                json.dump(manifest, f, indent=1)
+            with open(os.path.join(root, tree.LOADER_NAME), "w", encoding="utf-8", newline="\n") as f:
+                f.write(tree.loader_code(repo_url, project))
+            _remove_stale(root, previous - set(files))  # only after the new export is fully written
+        except Exception as e:
+            self.report({"ERROR"}, "Export failed: %s" % e)
+            return {"CANCELLED"}
+        for w in warnings:
+            self.report({"WARNING"}, w)
+        self.report({"INFO"}, "Exported %d nodes (%d holograms in game), %d OBJ files (%d triangles) to %s; commit and push, then use %s with project \"%s\"" % (
+            report["nodes"], report["holograms"], report["files"], report["triangles"], root, repo_url, project))
+        if report["holograms"] > 200:
+            self.report({"WARNING"}, "%d holograms exceeds Starfall's default limit of 200" % report["holograms"])
+        return {"FINISHED"}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.prop(self, "project_name")
+        layout.prop(self, "model_front")
+        layout.prop(self, "selection_only")
+        layout.prop(self, "include_hidden")
+        layout.prop(self, "invert_normals")
+        layout.prop(self, "nocull")
+        layout.prop(context.scene.p2m, "unit_scale", text="Units per BU")
+
+
 def menu_func_export(self, context):
     self.layout.operator(P2M_OT_export_advdupe2.bl_idname, text="AdvDupe2 Prop2Mesh (.txt)")
+    self.layout.operator(P2M_OT_export_starfall_tree.bl_idname, text="Starfall Mesh Tree (folders + manifest)")
 
 
-classes = (P2M_OT_export_advdupe2,)
+classes = (P2M_OT_export_advdupe2, P2M_OT_export_starfall_tree)

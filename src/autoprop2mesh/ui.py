@@ -1,7 +1,7 @@
 import bpy
 
 from . import content, entities, modelparts, props, sync
-from .export import P2M_OT_export_advdupe2
+from .export import P2M_OT_export_advdupe2, P2M_OT_export_starfall_tree
 
 
 class P2M_UL_controllers(bpy.types.UIList):
@@ -35,6 +35,7 @@ class P2M_PT_main(bpy.types.Panel):
             row.prop(shading, "color_type", text="")
         row = layout.row(align=True)
         row.operator(P2M_OT_export_advdupe2.bl_idname, icon="EXPORT", text="Export AdvDupe2")
+        row.operator(P2M_OT_export_starfall_tree.bl_idname, icon="EXPORT", text="Export Starfall Meshes")
         row.operator("p2m.rebuild_content", icon="FILE_REFRESH", text="")
 
 
