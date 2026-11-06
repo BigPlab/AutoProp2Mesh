@@ -23,7 +23,7 @@ RAW_URL = "https://raw.githubusercontent.com/%s/%s/%s/"
 
 
 def safe_name(name):
-    """File-name safe, lowercase ASCII."""
+    """File-name safe ASCII (case is kept)."""
     s = re.sub(r"[^A-Za-z0-9_\-]+", "_", name).strip("_")
     return s or "entity"
 

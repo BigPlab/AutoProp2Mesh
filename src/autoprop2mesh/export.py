@@ -12,7 +12,6 @@ The dupe origin (the point AdvDupe2 pastes at) is Blender's world origin.
 import json
 import math
 import os
-import shutil
 
 import bpy
 import numpy as np
@@ -305,6 +304,37 @@ def gather_tree(context, selection_only=False, include_hidden=False):
     return roots, warnings
 
 
+def _previous_export_files(root):
+    """OBJ paths (relative, '/'-separated) listed by an earlier export's manifest in
+    root; empty if root holds no manifest written by this exporter."""
+    try:
+        with open(os.path.join(root, tree.MANIFEST_NAME), encoding="utf-8") as f:
+            manifest = json.load(f)
+        if not isinstance(manifest, dict) or "version" not in manifest or "nodes" not in manifest:
+            return set()
+        return set(tree.manifest_files(manifest))
+    except (OSError, ValueError, TypeError, AttributeError):
+        return set()
+
+
+def _remove_stale(root, rels):
+    """Deletes files an earlier export wrote and this one no longer does, then the
+    folders that became empty. Anything else in the project folder is left alone."""
+    base = os.path.abspath(root)
+    for rel in rels:
+        path = os.path.abspath(os.path.join(base, *rel.split("/")))
+        if not path.startswith(base + os.sep):
+            continue
+        try:
+            os.remove(path)
+            folder = os.path.dirname(path)
+            while folder != base:
+                os.rmdir(folder)  # fails (and stops) at the first non-empty folder
+                folder = os.path.dirname(folder)
+        except OSError:
+            pass
+
+
 class P2M_OT_export_starfall_tree(bpy.types.Operator):
     """Export the parent hierarchy as a project folder (OBJ tree + manifest.json + loader chip) in the mesh repository"""
     bl_idname = "export_scene.p2m_starfall_tree"
@@ -361,8 +391,7 @@ class P2M_OT_export_starfall_tree(bpy.types.Operator):
         try:
             yaw = {"X": 0.0, "-Y": 90.0, "Y": -90.0, "-X": 180.0}[self.model_front]
             manifest, files, report = tree.build(roots, project, self.invert_normals, self.nocull, yaw)
-            if os.path.exists(os.path.join(root, tree.MANIFEST_NAME)):
-                shutil.rmtree(root)  # a previous export of this project: drop stale files
+            previous = _previous_export_files(root)
             os.makedirs(root, exist_ok=True)
             for rel, text in files.items():
                 path = os.path.join(root, *rel.split("/"))
@@ -373,6 +402,7 @@ class P2M_OT_export_starfall_tree(bpy.types.Operator):
                 json.dump(manifest, f, indent=1)
             with open(os.path.join(root, tree.LOADER_NAME), "w", encoding="utf-8", newline="\n") as f:
                 f.write(tree.loader_code(repo_url, project))
+            _remove_stale(root, previous - set(files))  # only after the new export is fully written
         except Exception as e:
             self.report({"ERROR"}, "Export failed: %s" % e)
             return {"CANCELLED"}

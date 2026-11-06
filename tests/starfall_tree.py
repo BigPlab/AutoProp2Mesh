@@ -125,6 +125,25 @@ try:
     check(report["holograms"] == sum(max(1, len(n["meshes"])) for n in (root, arm_node)),
           "hologram count reported (%d)" % report["holograms"])
 
+    # --- bounds, No Cull count, Render Inside, manifest file list ----------
+    def mesh_bounds_ok(node):
+        for m in node["meshes"]:
+            pts = np.array([[float(x) for x in l.split()[1:4]] for l in files[m["file"]].splitlines() if l.startswith("v ")])
+            if not (np.allclose(m["bounds"][0], pts.min(axis=0), atol=1e-4) and np.allclose(m["bounds"][1], pts.max(axis=0), atol=1e-4)):
+                return False
+        return True
+    check(mesh_bounds_ok(root) and mesh_bounds_ok(arm_node), "every mesh lists its bounding box for setRenderBounds")
+    check(sorted(tree.manifest_files(manifest)) == sorted(files), "manifest_files lists exactly the exported OBJ files")
+    _m2, _f2, report_nocull = tree.build(roots, "test", nocull=True)
+    check(report_nocull["holograms"] == sum(max(1, 2 * len(n["meshes"])) for n in (root, arm_node)),
+          "No Cull counts two holograms per mesh (%d)" % report_nocull["holograms"])
+    inside_node = tree.TreeNode("In", (0, 0, 0), (0, 0, 0), chunks=[p2m.PartGeometry(
+        "c", [[0, 0, 0], [1, 0, 0], [0, 1, 0]], [[0, 1, 2]], None, True)])
+    _m3, _f3, report_in = tree.build([inside_node], "in")
+    _m4, _f4, report_in_nc = tree.build([inside_node], "in", nocull=True)
+    check(report_in["triangles"] == 2 and report_in_nc["triangles"] == 1,
+          "Render Inside adds back faces (%d) unless No Cull already shows them (%d)" % (report_in["triangles"], report_in_nc["triangles"]))
+
     # --- transforms: composed manifest == Blender world matrix -----------
     def world_of(node, parent):
         rot = parent[0] @ tree.source_rotation(node["ang"])

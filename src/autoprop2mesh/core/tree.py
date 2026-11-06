@@ -79,13 +79,27 @@ def _in_frame(chunks, pos, ang):
     return out
 
 
-def mesh_groups(node):
+def _with_back_faces(chunks):
+    """Render Inside parts also draw their back faces: add a copy with the winding
+    reversed (its normals then point inward). Starfall has no per-mesh equivalent."""
+    out = []
+    for c in chunks:
+        out.append(c)
+        if c.vinside:
+            out.append(p2m.PartGeometry(c.name + ".in", c.positions, c.triangles[:, ::-1], c.vsmooth, False))
+    return out
+
+
+def mesh_groups(node, nocull=False):
     """[(color, material, uvs, [chunks in node's frame])] for the node's own mesh and
-    its rigid (childless mesh) children, merged per color/material/UV scale."""
+    its rigid (childless mesh) children, merged per color/material/UV scale.
+    Render Inside parts get back faces, unless nocull already draws both sides."""
     groups = {}
 
     def add(owner, chunks):
         if chunks:
+            if not nocull:
+                chunks = _with_back_faces(chunks)
             key = (tuple(int(c) for c in owner.color), owner.material, int(owner.uvs))
             groups.setdefault(key, []).extend(chunks)
 
@@ -99,37 +113,56 @@ def mesh_groups(node):
 def _batches(chunks):
     """Packs chunks into batches of at most MAX_PART_TRIANGLES (one Starfall mesh each)."""
     batch, count = [], 0
-    for part in chunks:
-        for piece in p2m.split_part(part):
-            n = len(piece.triangles)
-            if batch and count + n > p2m.MAX_PART_TRIANGLES:
-                yield batch
-                batch, count = [], 0
-            batch.append(piece)
-            count += n
+    for piece in chunks:  # already split to at most MAX_PART_TRIANGLES each
+        n = len(piece.triangles)
+        if batch and count + n > p2m.MAX_PART_TRIANGLES:
+            yield batch
+            batch, count = [], 0
+        batch.append(piece)
+        count += n
     if batch:
         yield batch
 
 
-def _emit(node, parent_dir, used, files, report, invert_normals):
+def _emit(node, parent_dir, used, files, report, invert_normals, nocull):
     name = _unique(node.name, used)
     node_dir = parent_dir + name + "/"
     out = {"name": node.name, "pos": _vec(node.pos), "ang": _vec(node.ang)}
     meshes = []
-    for color, material, uvs, chunks in mesh_groups(node):
+    for color, material, uvs, chunks in mesh_groups(node, nocull):
         size = uvs if uvs > 0 else starfall.DEFAULT_UV_SIZE
         for batch in _batches(chunks):
             path = "%smesh_%d.obj" % (node_dir, len(meshes) + 1)
             files[path] = starfall.obj_file_text(batch, float(size), invert_normals, single_object=True)
             report["triangles"] += sum(len(c.triangles) for c in batch)
-            meshes.append({"file": path, "color": list(color), "material": material})
+            # The loader puts every mesh on a 1x1x1 cube hologram whose own render bounds
+            # are tiny, so the mesh's real bounds are needed or big meshes get culled.
+            pts = np.vstack([c.positions[np.unique(c.triangles)] for c in batch if len(c.triangles)])
+            meshes.append({"file": path, "color": list(color), "material": material,
+                           "bounds": [_vec(pts.min(axis=0)), _vec(pts.max(axis=0))]})
     out["meshes"] = meshes
-    report["holograms"] += max(1, len(meshes))
+    report["holograms"] += max(1, len(meshes) * (2 if nocull else 1))  # nocull draws each mesh twice
     pivots = [c for c in node.children if is_pivot(c)]
     if pivots:
-        child_used = {"mesh_1", "mesh_2"}  # names the merged meshes can never collide with
-        out["children"] = [_emit(c, node_dir, child_used, files, report, invert_normals) for c in pivots]
+        child_used = set()
+        out["children"] = [_emit(c, node_dir, child_used, files, report, invert_normals, nocull) for c in pivots]
     report["nodes"] += 1
+    return out
+
+
+def manifest_files(manifest):
+    """Relative paths of the OBJ files a manifest lists (version 1 had one per node)."""
+    out = []
+
+    def walk(node):
+        out.extend(m["file"] for m in node.get("meshes", ()))
+        if node.get("file"):
+            out.append(node["file"])
+        for c in node.get("children", ()):
+            walk(c)
+
+    for n in manifest.get("nodes", ()):
+        walk(n)
     return out
 
 
@@ -138,7 +171,7 @@ def build(roots, name="mech", invert_normals=False, nocull=False, yaw=0.0):
     files = {}
     report = {"triangles": 0, "files": 0, "nodes": 0, "holograms": 0}
     used = set()
-    nodes = [_emit(r, "", used, files, report, invert_normals) for r in roots]
+    nodes = [_emit(r, "", used, files, report, invert_normals, nocull) for r in roots]
     report["files"] = len(files)
     manifest = {"version": 2, "name": name, "nocull": bool(nocull), "yaw": float(yaw), "nodes": nodes}
     return manifest, files, report
@@ -178,6 +211,7 @@ P2M = {nodes = {}, loaded = false}
 -- Downloads run in parallel (as many as Starfall allows); results land in `bodies`.
 -- bodies[name] is the text, false if the request failed, nil while pending.
 local bodies, queue, queued = {}, {}, 0
+local wake  -- resumes the loader; defined below. Download callbacks call it.
 
 local function want(name)
     if bodies[name] == nil and not queue[name] then
@@ -188,7 +222,8 @@ local function want(name)
 end
 
 local next_request = 1
-local function pump()
+local pump
+function pump()
     while next_request <= queued and http.canRequest() do
         local name = queue[next_request]
         next_request = next_request + 1
@@ -200,14 +235,21 @@ local function pump()
                 else
                     bodies[name] = b
                 end
+                pump()  -- a request slot just freed up
+                wake()
             end,
-            function(reason) bodies[name] = false print("P2M: failed to download " .. url .. ": " .. tostring(reason)) end)
+            function(reason)
+                bodies[name] = false
+                print("P2M: failed to download " .. url .. ": " .. tostring(reason))
+                pump()
+                wake()
+            end)
     end
 end
 
 local function get(name)
     want(name)
-    while bodies[name] == nil do coroutine.yield() end
+    while bodies[name] == nil do coroutine.yield("wait") end  -- idle until a download callback wakes the loader
     local body = bodies[name]
     bodies[name] = nil  -- the OBJ text is only needed once
     queue[name] = nil
@@ -234,7 +276,7 @@ local function newHolo(parent)
             warned = true
             print("P2M: out of holograms (Starfall limit); remove other hologram chips and respawn")
         end
-        coroutine.yield()
+        coroutine.yield("spawn")
     end
     local h = hologram.create(parent:getPos(), parent:getAngles(), HOLO_MODEL)
     h:setParent(parent)
@@ -260,7 +302,7 @@ local function build(node, parent, path, nocull, yaw)
         if body then
             local ok, mat = pcall(material.load, m.material)
             local c = m.color
-            for _, msh in pairs(mesh.createFromObj(body, true, true)) do
+            for _, msh in pairs(mesh.createFromObj(body, true, false)) do
                 for _, mode in ipairs(nocull and {0, 1} or {0}) do
                     local h = anchor
                     if drawn then
@@ -270,6 +312,10 @@ local function build(node, parent, path, nocull, yaw)
                     end
                     drawn = true
                     h:setMesh(msh)
+                    if m.bounds then
+                        local b = m.bounds
+                        h:setRenderBounds(Vector(b[1][1], b[1][2], b[1][3]), Vector(b[2][1], b[2][2], b[2][3]))
+                    end
                     if nocull then h:setCullMode(mode) end
                     if ok and mat then h:setMeshMaterial(mat) end
                     h:setColor(Color(c[1], c[2], c[3], c[4]))
@@ -326,20 +372,53 @@ local function load()
 end
 
 -- Needs the client to grant the permissions Starfall asks for (http, mesh, material, hologram, parenting).
--- Starfall's threaded mesh parser yields every ~100 lines, so resuming once per tick would
--- cap the load at 100 lines per tick. Keep resuming within the tick while there is quota.
+-- The think hook only exists while there is work to do. When the loader has to wait (for a download,
+-- or for a free hologram slot) the hook is removed, so an idle chip costs nothing; download callbacks
+-- and a timer put it back. Starfall's threaded mesh parser yields every ~100 lines, so while parsing
+-- the loader keeps resuming within the tick as long as there is quota.
 local co = coroutine.create(load)
-hook.add("think", "p2m_loader", function()
+local hooked = false
+
+local function sleep()
+    if hooked then
+        hooked = false
+        hook.remove("think", "p2m_loader")
+    end
+end
+
+local function step()
     pump()
     local me = chip()
-    local budget, resumes = quotaMax() * 0.7, 0
+    local budget, resumes, res = quotaMax() * 0.7, 0, nil
     while coroutine.status(co) ~= "dead" and resumes < 2000
             and me:getQuotaUsed() < budget and quotaAverage() < quotaMax() * 0.9 do
-        coroutine.resume(co)
+        local ok
+        ok, res = coroutine.resume(co)
         resumes = resumes + 1
+        if not ok then
+            print("P2M: load failed: " .. tostring(res))
+            break
+        end
+        if res == "wait" or res == "spawn" then break end
     end
-    if coroutine.status(co) == "dead" then hook.remove("think", "p2m_loader") end
-end)
+    if coroutine.status(co) == "dead" then
+        sleep()
+    elseif res == "wait" then
+        sleep()  -- a download callback wakes us
+        if next_request <= queued then timer.simple(0.5, wake) end  -- requests still held back by canRequest: retry
+    elseif res == "spawn" then
+        sleep()  -- no callback announces a free hologram slot, so poll slowly
+        timer.simple(0.5, wake)
+    end
+end
+
+function wake()
+    if hooked or coroutine.status(co) == "dead" then return end
+    hooked = true
+    hook.add("think", "p2m_loader", step)
+end
+
+wake()
 '''
 
 

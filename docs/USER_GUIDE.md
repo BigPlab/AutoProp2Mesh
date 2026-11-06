@@ -330,12 +330,14 @@ Commit and push the repository, then paste `loader.lua` into a Starfall chip and
 
 | Option | Default | What it does |
 |---|---|---|
-| **Project Name** | the .blend name | Folder created inside the repository. Exporting the same name again replaces that folder |
+| **Project Name** | the .blend name | Folder created inside the repository. Exporting the same name again replaces the files the previous export wrote there; other files in the folder are kept |
 | **Model Faces** | +X | The direction the model faces in Blender. The whole model is turned so it faces +X in game. A model built facing Blender's front view (-Y) needs the `-Y` setting |
 | **Selected Hierarchies Only** | Off | Exports only hierarchies that contain a selected object |
 | **Include Hidden Parts** | Off | Also exports hidden parts |
 | **Invert Normals** | Off | Flips winding and normals (inside-out meshes) |
 | **No Cull** | Off | Draws both sides of every face (one extra hologram per mesh) |
+
+Parts marked **Render Inside** get an inward-facing copy of their faces (extra triangles) so both sides draw, unless No Cull is on.
 
 **In game.** The settings at the top of `loader.lua`:
 

@@ -129,15 +129,31 @@ def resolved_gmod_dir(prefs=None):
     return _detected[0]
 
 
+def _github_remote(config_text):
+    """(user, repo) of the clone's GitHub remote: origin first, else the first GitHub remote."""
+    urls = {}
+    remote = None
+    for line in config_text.splitlines():
+        line = line.strip()
+        if line.startswith("["):
+            m = re.match(r'\[remote\s+"([^"]+)"\]', line)
+            remote = m.group(1) if m else None
+        elif remote and re.match(r"url\s*=", line):
+            urls.setdefault(remote, line.split("=", 1)[1].strip())
+    for name in sorted(urls, key=lambda n: n != "origin"):
+        m = re.search(r"github\.com[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?/?$", urls[name])
+        if m:
+            return m.group(1), m.group(2)
+    return None, None
+
+
 def _git_info(repo_dir):
     """(user, repo, branch) read from a clone's .git folder; any may be None."""
     user = repo = branch = None
     git = os.path.join(repo_dir, ".git")
     try:
         with open(os.path.join(git, "config"), encoding="utf-8", errors="replace") as f:
-            m = re.search(r"github\.com[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?\s*$", f.read(), re.M)
-        if m:
-            user, repo = m.group(1), m.group(2)
+            user, repo = _github_remote(f.read())
     except OSError:
         pass
     try:
