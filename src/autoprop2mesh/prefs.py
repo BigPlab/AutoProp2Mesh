@@ -1,4 +1,5 @@
 import os
+import re
 
 import bpy
 from bpy.props import BoolProperty, CollectionProperty, IntProperty, StringProperty
@@ -32,6 +33,14 @@ class P2M_AddonPreferences(bpy.types.AddonPreferences):
         description="Largest texture mip level loaded for previews",
     )
 
+    repo_dir: StringProperty(
+        name="Mesh Repository Folder", subtype="DIR_PATH",
+        description="Local clone of the GitHub repository (e.g. a GitHub Desktop folder) that Starfall mesh projects are exported into",
+    )
+    github_user: StringProperty(name="GitHub User", description="Leave empty to read it from the repository's git config")
+    github_repo: StringProperty(name="GitHub Repository", description="Leave empty to read it from the repository's git config")
+    github_branch: StringProperty(name="Branch", description="Leave empty to use the repository's checked-out branch")
+
     def draw(self, context):
         from . import content
         layout = self.layout
@@ -55,6 +64,15 @@ class P2M_AddonPreferences(bpy.types.AddonPreferences):
         row.prop(self, "mount_workshop")
         row.prop(self, "mount_games")
         layout.prop(self, "texture_size")
+
+        box = layout.box()
+        box.label(text="Starfall Mesh Repository")
+        box.prop(self, "repo_dir")
+        user, repo, branch = resolved_github(self)
+        for prop in ("github_user", "github_repo", "github_branch"):
+            box.prop(self, prop)
+        box.label(text="Using: %s/%s @ %s" % (user or "?", repo or "?", branch or "?"),
+                  icon="CHECKMARK" if user and repo else "ERROR")
 
         row = layout.row()
         row.label(text=content.status_text())
@@ -109,6 +127,45 @@ def resolved_gmod_dir(prefs=None):
         except Exception:
             _detected.append(None)
     return _detected[0]
+
+
+def _git_info(repo_dir):
+    """(user, repo, branch) read from a clone's .git folder; any may be None."""
+    user = repo = branch = None
+    git = os.path.join(repo_dir, ".git")
+    try:
+        with open(os.path.join(git, "config"), encoding="utf-8", errors="replace") as f:
+            m = re.search(r"github\.com[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?\s*$", f.read(), re.M)
+        if m:
+            user, repo = m.group(1), m.group(2)
+    except OSError:
+        pass
+    try:
+        with open(os.path.join(git, "HEAD"), encoding="utf-8") as f:
+            m = re.match(r"ref: refs/heads/(.+)", f.read().strip())
+        if m:
+            branch = m.group(1)
+    except OSError:
+        pass
+    return user, repo, branch
+
+
+def resolved_repo_dir(prefs=None):
+    prefs = prefs or get_prefs()
+    if prefs and prefs.repo_dir:
+        return os.path.abspath(bpy.path.abspath(prefs.repo_dir))
+    return None
+
+
+def resolved_github(prefs=None):
+    """(user, repo, branch): preferences first, then the clone's git config."""
+    prefs = prefs or get_prefs()
+    if prefs is None:
+        return None, None, None
+    repo_dir = resolved_repo_dir(prefs)
+    gu, gr, gb = _git_info(repo_dir) if repo_dir else (None, None, None)
+    return (prefs.github_user.strip() or gu, prefs.github_repo.strip() or gr,
+            prefs.github_branch.strip() or gb or "main")
 
 
 def default_dupe_dir():
